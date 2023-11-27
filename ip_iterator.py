@@ -2,13 +2,14 @@
 
 import argparse
 import ipaddress
+import logging
+import os
+import signal
 import subprocess
 import sys
-import time
-import signal
-import logging
 import threading
-from colorama import init, Fore, Style
+
+from colorama import init, Fore
 
 init(autoreset=True)
 
@@ -28,10 +29,8 @@ BANNER = """
 is_interrupted = False
 
 def signal_handler(sig, frame):
-    global is_interrupted
-    is_interrupted = True
+    stop_event.set()
     logging.info("Program interrupted by user.")
-    reset_terminal_settings()
     sys.exit(0)
 
 def parse_arguments():
@@ -47,37 +46,33 @@ def parse_arguments():
     return parser.parse_args()
 
 def load_ips(file_path):
+    if not os.path.exists(file_path):
+        error_message = f"Error: File '{file_path}' not found."
+        print(Fore.RED + error_message)
+        logging.error(error_message)
+        sys.exit(1)
+        
     try:
         with open(file_path, "r") as file:
             lines = file.readlines()
+       
         ips = [line.strip() for line in lines]
 
-        # Process each IP, CIDR, or range to remove duplicates
-        processed_ips = []
+        processed_ips = set()  # Use set for deduplication
         for ip in ips:
             if "-" in ip:
                 start_ip, end_ip = ip.split("-")
-                start_ip = int(ipaddress.IPv4Address(start_ip.strip()))
-                end_ip = int(ipaddress.IPv4Address(end_ip.strip()))
-                processed_ips.extend(str(ipaddress.IPv4Address(ip)) for ip in range(start_ip, end_ip + 1))
+                ip_range = range(int(ipaddress.IPv4Address(start_ip.strip())), int(ipaddress.IPv4Address(end_ip.strip())) + 1)
+                processed_ips.update(map(str, map(ipaddress.IPv4Address, ip_range)))
             else:
-                try:
-                    ip_network = ipaddress.ip_network(ip)
-                    processed_ips.extend(str(ip) for ip in ip_network)
-                except ValueError:
-                    # If not a valid CIDR or range, assume it's a single IP
-                    processed_ips.append(ip)
+                processed_ips.update(map(str, ipaddress.ip_network(ip, strict=False)))
 
-        # Remove duplicates while preserving the order of appearance
-        unique_ips = []
-        for ip in processed_ips:
-            if ip not in unique_ips:
-                unique_ips.append(ip)
+        return sorted(list(processed_ips))
 
-        return unique_ips
-
-    except FileNotFoundError:
-        logging.exception(f"Error: File '{file_path}' not found.")
+    except Exception as e:
+        error_message = f"An error occurred while loading the IPs from the file: {e}"
+        print(Fore.RED + error_message)
+        logging.error(error_message)
         sys.exit(1)
 
 def execute_commands_thread(command, ips, timeout, no_output):
@@ -112,7 +107,7 @@ def execute_commands_thread(command, ips, timeout, no_output):
                     except Exception as e:
                         print(Fore.RED + f"Error occurred while writing combined output for IP '{ip}': {e}")
         except subprocess.TimeoutExpired:
-            print(Fore.RED + f"{threading.current_thread().name}: IP {ip} timed out. Moving to the next IP.")
+            print(Fore.RED + f"{threading.current_thread().name}: IP {ip} timed out.")
             try:
                 with open("combined_output.txt", "a") as file:
                     file.write(f"{threading.current_thread().name}: IP {idx}/{len(ips)} Timeout: The command execution timed out.\n\n")
@@ -154,11 +149,13 @@ def main():
     # Register the signal handler for KeyboardInterrupt (Ctrl+C)
     signal.signal(signal.SIGINT, signal_handler)
 
-    logging.info(BANNER)
+    print(BANNER)
     try:
         args = parse_arguments()
         if not args.command or not args.file:
-            logging.error("Error: Please provide both the command and the file path. Use -h for help.")
+            error_message = "Error: Please provide both the command and the file path. Use -h for help."
+            print(Fore.RED + error_message)
+            logging.error(error_message)
             sys.exit(1)
         ips = load_ips(args.file)
         execute_commands(args.command, ips, args.timeout, args.no_output, args.threads)
@@ -166,7 +163,9 @@ def main():
         # Ignore KeyboardInterrupt here as it is handled by the signal handler
         pass
     except Exception as e:
-        logging.exception(f"An error occurred: {e}")
+        error_message = f"An error occurred: {e}"
+        print(Fore.RED + error_message)
+        logging.exception(error_message)
         sys.exit(1)
 
 if __name__ == "__main__":
